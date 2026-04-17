@@ -36,7 +36,8 @@ ENV RMR_SEED_RT /opt/route/local.rt
 # Install
 COPY setup.py /tmp
 COPY LICENSE.txt /tmp/
-RUN pip install /tmp
+#RUN pip install /tmp
+RUN pip install /tmp && pip install numpy==1.26.4 pandas==2.0.3 influxdb-client
 COPY src/ /src
 # Run
 ENV PYTHONUNBUFFERED 1

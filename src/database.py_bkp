@@ -14,10 +14,12 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 # ==================================================================================
-from influxdb_client import InfluxDBClient
+from influxdb import DataFrameClient
 from configparser import ConfigParser
 from mdclogpy import Logger
 from src.exceptions import NoDataError
+from influxdb.exceptions import InfluxDBClientError, InfluxDBServerError
+from requests.exceptions import RequestException
 import pandas as pd
 import time
 
@@ -26,7 +28,7 @@ logger = Logger(name=__name__)
 
 class DATABASE(object):
 
-    def __init__(self, dbname='default', user='admin', password='admin-token', host="ricplt-influxdb.ricplt", port='8086', path='', ssl=False):
+    def __init__(self, dbname='Timeseries', user='root', password='root', host="r4-influxdb.ricplt", port='8086', path='', ssl=False):
         self.host = host
         self.port = port
         self.user = user
@@ -36,10 +38,6 @@ class DATABASE(object):
         self.dbname = dbname
         self.data = None
         self.client = None
-        self.write_api = None
-        self.query_api = None
-        self.org = "influxdata"
-        self.token = "admin-token"
         self.config()
 
     def connect(self):
@@ -47,19 +45,16 @@ class DATABASE(object):
             self.client.close()
 
         try:
-            url = "http://{}:{}".format(self.host, self.port)
-            self.client = InfluxDBClient(url=url, token=self.token, org=self.org)
-            self.query_api = self.client.query_api()
-            self.write_api = self.client.write_api()
-            health = self.client.health()
-            logger.info("Connected to InfluxDB v2, status: {}".format(health.status))
+            self.client = DataFrameClient(self.host, port=self.port, username=self.user, password=self.password, path=self.path, ssl=self.ssl, database=self.dbname, verify_ssl=self.ssl)
+            version = self.client.request('ping', expected_response_code=204).headers['X-Influxdb-Version']
+            logger.info("Conected to Influx Database, InfluxDB version : {}".format(version))
             return True
 
-        except Exception as e:
-            logger.error("Failed to establish a new connection with InfluxDB: {}".format(e))
+        except (RequestException, InfluxDBClientError, InfluxDBServerError, ConnectionError):
+            logger.error("Failed to establish a new connection with InflulxDB, Please check your url/hostname")
             time.sleep(120)
 
-    def read_data(self, meas='UeMetrics', limit=10000, cellid=False, ueid=False):
+    def read_data(self, meas='ueMeasReport', limit=10000, cellid=False, ueid=False):
 
         if cellid:
             meas = self.cellmeas
@@ -72,71 +67,42 @@ class DATABASE(object):
             limit = 1
             Id = ueid
 
-        query = (
-            f'from(bucket: "{self.dbname}")'
-            f' |> range(start: -1h)'
-            f' |> filter(fn: (r) => r._measurement == "{meas}")'
-            f' |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")'
-        )
-        if cellid or ueid:
-            query += f' |> filter(fn: (r) => string(v: r["{param}"]) == "{Id}")'
-        query += f' |> sort(columns: ["_time"], desc: true)'
-        query += f' |> limit(n: {limit})'
+        query = """select * from {}""".format(meas)
+        query += """ where "{}" = \'{}\'""".format(param, Id)
+        query += "  ORDER BY DESC LIMIT {}".format(limit)
+        self.query(query, meas, Id)
 
-        self.query(query, meas, Id if (cellid or ueid) else False)
-
-    def query(self, query, meas=None, Id=False):
+    def query(self, query, meas, Id=False):
         try:
-            result = self.query_api.query_data_frame(query)
-            if isinstance(result, list):
-                if len(result) == 0:
-                    raise NoDataError
-                result = pd.concat(result)
-            if result.empty:
+            result = self.client.query(query)
+            if len(result) == 0:
                 raise NoDataError
+            else:
+                self.data = result[meas]
 
-            drop_cols = [c for c in ['result', 'table', '_start', '_stop', '_measurement'] if c in result.columns]
-            result = result.drop(columns=drop_cols, errors='ignore')
-            if '_time' in result.columns:
-                result = result.set_index('_time')
-            self.data = result
+        except (RequestException, InfluxDBClientError, InfluxDBServerError):
+            logger.error("Failed to connect to influxdb")
 
         except NoDataError:
             self.data = None
             if Id:
-                logger.error("Data not found for {} in measurement: {}".format(Id, meas))
+                logger.error("Data not found for " + Id + " in measurement: "+meas)
             else:
-                logger.error("Data not found for {}".format(meas))
+                logger.error("Data not found for " + meas)
 
-        except Exception as e:
-            self.data = None
-            logger.error("Failed to query influxdb: {}".format(e))
-
-    def cells(self, meas='cellMetrics', limit=100):
+    def cells(self, meas='CellReports', limit=100):
         meas = self.cellmeas
-        query = (
-            f'from(bucket: "{self.dbname}")'
-            f' |> range(start: -1h)'
-            f' |> filter(fn: (r) => r._measurement == "{meas}")'
-            f' |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")'
-            f' |> sort(columns: ["_time"], desc: true)'
-            f' |> limit(n: {limit})'
-        )
+        query = """select * from {}""".format(meas)
+        query += " ORDER BY DESC LIMIT {}".format(limit)
         self.query(query, meas)
-        if self.data is not None and self.cid in self.data.columns:
+        if self.data is not None:
             return self.data[self.cid].unique()
 
     def write_prediction(self, df, meas_name='QP'):
         try:
-            from influxdb_client.client.write_api import SYNCHRONOUS
-            write_api = self.client.write_api(write_options=SYNCHRONOUS)
-            for idx, row in df.iterrows():
-                record = {"measurement": meas_name, "time": idx, "fields": {}}
-                for col in df.columns:
-                    record["fields"][col] = float(row[col]) if isinstance(row[col], (int, float)) else str(row[col])
-                write_api.write(bucket=self.dbname, org=self.org, record=record)
-        except Exception as e:
-            logger.error("Failed to send metrics to influxdb: {}".format(e))
+            self.client.write_points(df, meas_name)
+        except (RequestException, InfluxDBClientError, InfluxDBServerError):
+            logger.error("Failed to send metrics to influxdb")
 
     def config(self):
         cfg = ConfigParser()

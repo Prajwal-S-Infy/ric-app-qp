@@ -2,17 +2,17 @@
 host = ricplt-influxdb.ricplt
 port = 8086
 user = admin
-password = admin-token
+password = 
 path =
-database = default
-uemeas = UeMetrics
-cellmeas = cellMetrics
+database = RIC-Test
+uemeas = UEReports
+cellmeas = CellReports
 ssl = False
 
 [features]
-thptDL = DRB.UEThpDl
-thptUL = DRB.UEThpUl
+thptDL = pdcpBytesDl
+thptUL = pdcpBytesUl
 ue = ue-id
 nbcells = nbCell
-servcell = nrCell
+servcell = nrCell 
 cid = nrCellIdentity
